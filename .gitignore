@@ -1,0 +1,10 @@
+chess
+chess-debug
+*.exe
+*.dll
+*.layout
+*.depend
+*~
+bin
+obj
+*.save
