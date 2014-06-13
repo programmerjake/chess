@@ -5,7 +5,10 @@
 #include <array>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 #include <cassert>
+#include <cstdint>
+#include <tuple>
 
 using namespace std;
 
@@ -101,6 +104,122 @@ inline PieceColor getPieceColor(PieceType piece)
     }
     assert(false);
     return PieceColor::None;
+}
+
+inline PieceColor getPieceColor(Player player)
+{
+    switch(player)
+    {
+    case Player::Black:
+        return PieceColor::Black;
+    case Player::White:
+        return PieceColor::White;
+    }
+    assert(false);
+    return PieceColor::None;
+}
+
+inline Player getOpponent(Player player)
+{
+    if(player == Player::White)
+        return Player::Black;
+    return Player::White;
+}
+
+inline PieceColor getOpponent(PieceColor color)
+{
+    switch(color)
+    {
+    case PieceColor::Black:
+        return PieceColor::White;
+    case PieceColor::White:
+        return PieceColor::Black;
+    default:
+        return PieceColor::None;
+    }
+}
+
+inline PieceType setPieceColor(PieceType piece, PieceColor color)
+{
+    assert(color != PieceColor::None);
+    switch(piece)
+    {
+    case PieceType::Empty:
+        return PieceType::Empty;
+    case PieceType::WhitePawn:
+    case PieceType::BlackPawn:
+        if(color == PieceColor::White)
+            return PieceType::WhitePawn;
+        return PieceType::BlackPawn;
+    case PieceType::WhiteRook:
+    case PieceType::BlackRook:
+        if(color == PieceColor::White)
+            return PieceType::WhiteRook;
+        return PieceType::BlackRook;
+    case PieceType::WhiteKnight:
+    case PieceType::BlackKnight:
+        if(color == PieceColor::White)
+            return PieceType::WhiteKnight;
+        return PieceType::BlackKnight;
+    case PieceType::WhiteBishop:
+    case PieceType::BlackBishop:
+        if(color == PieceColor::White)
+            return PieceType::WhiteBishop;
+        return PieceType::BlackBishop;
+    case PieceType::WhiteQueen:
+    case PieceType::BlackQueen:
+        if(color == PieceColor::White)
+            return PieceType::WhiteQueen;
+        return PieceType::BlackQueen;
+    case PieceType::WhiteKing:
+    case PieceType::BlackKing:
+        if(color == PieceColor::White)
+            return PieceType::WhiteKing;
+        return PieceType::BlackKing;
+    }
+    assert(false);
+    return PieceType::Empty;
+}
+
+inline PieceType setPieceColor(PieceType piece, Player player)
+{
+    switch(piece)
+    {
+    case PieceType::Empty:
+        return PieceType::Empty;
+    case PieceType::WhitePawn:
+    case PieceType::BlackPawn:
+        if(player == Player::White)
+            return PieceType::WhitePawn;
+        return PieceType::BlackPawn;
+    case PieceType::WhiteRook:
+    case PieceType::BlackRook:
+        if(player == Player::White)
+            return PieceType::WhiteRook;
+        return PieceType::BlackRook;
+    case PieceType::WhiteKnight:
+    case PieceType::BlackKnight:
+        if(player == Player::White)
+            return PieceType::WhiteKnight;
+        return PieceType::BlackKnight;
+    case PieceType::WhiteBishop:
+    case PieceType::BlackBishop:
+        if(player == Player::White)
+            return PieceType::WhiteBishop;
+        return PieceType::BlackBishop;
+    case PieceType::WhiteQueen:
+    case PieceType::BlackQueen:
+        if(player == Player::White)
+            return PieceType::WhiteQueen;
+        return PieceType::BlackQueen;
+    case PieceType::WhiteKing:
+    case PieceType::BlackKing:
+        if(player == Player::White)
+            return PieceType::WhiteKing;
+        return PieceType::BlackKing;
+    }
+    assert(false);
+    return PieceType::Empty;
 }
 
 struct GameState final
@@ -204,13 +323,22 @@ public:
         return staticEvaluation;
     }
 private:
-    bool isPositionAttackedByPawn(size_t x, size_t y) const;
-    bool isPositionAttackedByRookOrQueenOnOrthagonals(size_t x, size_t y) const;
-    bool isPositionAttackedByBishopOrQueenOnDiagonals(size_t x, size_t y) const;
-    bool isPositionAttackedByKnight(size_t x, size_t y) const;
-    bool isPositionAttackedByKing(size_t x, size_t y) const;
+    bool isPositionAttackedByPawn(size_t x, size_t y, Player side) const;
+    bool isPositionAttackedByRookOrQueenOnOrthagonals(size_t x, size_t y, Player side) const;
+    bool isPositionAttackedByBishopOrQueenOnDiagonals(size_t x, size_t y, Player side) const;
+    bool isPositionAttackedByKnight(size_t x, size_t y, Player side) const;
+    bool isPositionAttackedByKing(size_t x, size_t y, Player side) const;
 public:
-    bool isPositionAttacked(size_t x, size_t y) const;
+    bool isPositionAttacked(size_t x, size_t y, Player side) const;
+    inline bool isPositionAttacked(size_t x, size_t y) const
+    {
+        return isPositionAttacked(x, y, player);
+    }
+    bool isKingAttacked(Player side) const;
+    inline bool isKingAttacked() const
+    {
+        return isKingAttacked(player);
+    }
 };
 
 namespace std
@@ -325,6 +453,39 @@ struct GameStateMove final
     }
 };
 
-const vector<GameState> & getValidMoves(GameState gs);
+struct GameStateCache final
+{
+    const vector<GameStateMove> & getValidMoves(GameState gs);
+private:
+    struct Data final
+    {
+        vector<GameStateMove> validMoves;
+        uint64_t lastAccessTimeStamp = 0;
+        bool calculated = false;
+    };
+    unordered_map<GameState, Data> validMovesMap;
+    constexpr size_t maxEntryCount = 10000000;
+    constexpr size_t entryCountSlop = 1000000;
+    uint64_t currentTimeStamp = 0;
+    inline Data & getGameStateEntry(GameState gs)
+    {
+        if(validMovesMap.size() > maxEntryCount + entryCountSlop)
+        {
+            const uint64_t minTimeStampToKeep = currentTimeStamp - maxEntryCount;
+            for(auto i = validMovesMap.begin(); i != validMovesMap.end();)
+            {
+                Data & data = get<1>(*i);
+                if(data.lastAccessTimeStamp < minTimeStampToKeep)
+                    i = validMovesMap.erase(i);
+                else
+                    i++;
+            }
+        }
+        Data & retval = validMovesMap[gs];
+        retval.lastAccessTimeStamp = ++currentTimeStamp;
+        return retval;
+    }
+};
+
 
 #endif // GAME_STATE_H_INCLUDED
