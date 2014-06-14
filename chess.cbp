@@ -32,7 +32,11 @@
 			<Add option="-std=c++11" />
 			<Add option="-Wall" />
 			<Add option="-fexceptions" />
+			<Add option="-pthread" />
 		</Compiler>
+		<Linker>
+			<Add option="-pthread" />
+		</Linker>
 		<Unit filename="game_state.cpp" />
 		<Unit filename="game_state.h" />
 		<Unit filename="main.cpp" />

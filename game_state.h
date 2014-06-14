@@ -9,10 +9,13 @@
 #include <cassert>
 #include <cstdint>
 #include <tuple>
+#include <iostream>
+#include <string>
+#include <sstream>
 
 using namespace std;
 
-enum class PieceType
+enum class PieceType : uint8_t
 {
     Empty,
     WhitePawn,
@@ -57,7 +60,7 @@ enum class EndCondition
 struct InvalidMove final : public runtime_error
 {
     InvalidMove()
-        : runtime_error("invalid move");
+        : runtime_error("invalid move")
     {
     }
 };
@@ -222,10 +225,47 @@ inline PieceType setPieceColor(PieceType piece, Player player)
     return PieceType::Empty;
 }
 
+inline string getPieceString(PieceType piece, bool useUnicode = true)
+{
+    switch(piece)
+    {
+    case PieceType::Empty:
+        return " ";
+    case PieceType::WhitePawn:
+        return useUnicode ? "♙" : "P";
+    case PieceType::WhiteRook:
+        return useUnicode ? "♖" : "R";
+    case PieceType::WhiteKnight:
+        return useUnicode ? "♘" : "N";
+    case PieceType::WhiteBishop:
+        return useUnicode ? "♗" : "B";
+    case PieceType::WhiteQueen:
+        return useUnicode ? "♕" : "Q";
+    case PieceType::WhiteKing:
+        return useUnicode ? "♔" : "K";
+    case PieceType::BlackPawn:
+        return useUnicode ? "♟" : "p";
+    case PieceType::BlackRook:
+        return useUnicode ? "♜" : "r";
+    case PieceType::BlackKnight:
+        return useUnicode ? "♞" : "n";
+    case PieceType::BlackBishop:
+        return useUnicode ? "♝" : "b";
+    case PieceType::BlackQueen:
+        return useUnicode ? "♛" : "q";
+    case PieceType::BlackKing:
+        return useUnicode ? "♚" : "k";
+    }
+    assert(false);
+    return " ";
+}
+
+struct GameStateCache;
+
 struct GameState final
 {
     array<array<PieceType, BoardSize>, BoardSize> board;
-    Player player = White;
+    Player player = Player::White;
     bool blackCanCastleLeft = true;
     bool blackCanCastleRight = true;
     bool whiteCanCastleLeft = true;
@@ -270,7 +310,7 @@ struct GameState final
         retval.player = Player::White;
         return retval;
     }
-    friend operator ==(const GameState &l, const GameState &r)
+    friend bool operator ==(const GameState &l, const GameState &r)
     {
         for(size_t x = 0; x < BoardSize; x++)
         {
@@ -296,35 +336,35 @@ struct GameState final
             return false;
         return true;
     }
-    friend operator !=(const GameState &l, const GameState &r)
+    friend bool operator !=(const GameState &l, const GameState &r)
     {
         return !operator ==(l, r);
     }
 private:
-    EndCondition endCondition = Nothing;
+    EndCondition endCondition = EndCondition::Nothing;
     bool endConditionSet = false;
-    void calcEndCondition();
+    void calcEndCondition(GameStateCache &cache);
 public:
-    inline EndCondition getEndCondition()
+    inline EndCondition getEndCondition(GameStateCache &cache)
     {
-        if(!endConditionSet)
-            calcEndCondition();
+        //if(!endConditionSet)
+            calcEndCondition(cache);
         return endCondition;
     }
 private:
     float staticEvaluation;
     bool staticEvaluationSet = false;
-    void calcStaticEvaluation();
+    void calcStaticEvaluation(GameStateCache &cache);
 public:
-    inline float getStaticEvaluation()
+    inline float getStaticEvaluation(GameStateCache &cache)
     {
-        if(!staticEvaluationSet)
-            calcStaticEvaluation();
+        //if(!staticEvaluationSet)
+            calcStaticEvaluation(cache);
         return staticEvaluation;
     }
 private:
     bool isPositionAttackedByPawn(size_t x, size_t y, Player side) const;
-    bool isPositionAttackedByRookOrQueenOnOrthagonals(size_t x, size_t y, Player side) const;
+    bool isPositionAttackedByRookOrQueenOnOrthogonals(size_t x, size_t y, Player side) const;
     bool isPositionAttackedByBishopOrQueenOnDiagonals(size_t x, size_t y, Player side) const;
     bool isPositionAttackedByKnight(size_t x, size_t y, Player side) const;
     bool isPositionAttackedByKing(size_t x, size_t y, Player side) const;
@@ -339,6 +379,7 @@ public:
     {
         return isKingAttacked(player);
     }
+    void drawChessBoard(GameStateCache &cache, bool useUnicode = true, bool moveToHome = true, int startX = -1, int startY = -1, int endX = -1, int endY = -1) const;
 };
 
 namespace std
@@ -451,6 +492,33 @@ struct GameStateMove final
         gs.player = (gs.player == Player::Black ? Player::White : Player::Black);
         return gs;
     }
+    string toString(GameState gs) const
+    {
+        ostringstream os;
+        PieceType movingPiece = gs.board[startX][startY];
+        if(movingPiece == PieceType::BlackKing || movingPiece == PieceType::WhiteKing)
+        {
+            if(abs((int)endX - (int)startX) >= 2)
+            {
+                if(endX < startX)
+                    return "0-0-0";
+                return "0-0";
+            }
+        }
+        PieceType capturedPiece = gs.board[captureX][captureY];
+        os << getPieceString(setPieceColor(movingPiece, Player::White), true);
+        os << (char)('a' + startX) << (char)('1' + startY);
+        if(capturedPiece != PieceType::Empty)
+            os << "x";
+        os << (char)('a' + endX) << (char)('1' + endY);
+        if(promoteToType != PieceType::Empty)
+        {
+            os << "=" << getPieceString(setPieceColor(promoteToType, Player::White), true);
+        }
+        if(captureX != endX || captureY != endY)
+            os << "e.p.";
+        return os.str();
+    }
 };
 
 struct GameStateCache final
@@ -464,8 +532,8 @@ private:
         bool calculated = false;
     };
     unordered_map<GameState, Data> validMovesMap;
-    constexpr size_t maxEntryCount = 10000000;
-    constexpr size_t entryCountSlop = 1000000;
+    static constexpr size_t maxEntryCount = 200000;
+    static constexpr size_t entryCountSlop = 20000;
     uint64_t currentTimeStamp = 0;
     inline Data & getGameStateEntry(GameState gs)
     {
@@ -485,7 +553,13 @@ private:
         retval.lastAccessTimeStamp = ++currentTimeStamp;
         return retval;
     }
+public:
+    void dumpStats()
+    {
+        cout << "Game State Count : " << validMovesMap.size() << "\x1b[K\r\n" << flush;
+    }
 };
 
+GameStateMove getBestMove(GameState gs, GameStateCache &cache, int depth = 3);
 
 #endif // GAME_STATE_H_INCLUDED
