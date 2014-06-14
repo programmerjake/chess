@@ -476,7 +476,7 @@ void runComputerMove()
         }
         cout << "\x1b[s\x1b[H\x1b[14B\x1b[K\x1b[u" << flush;
     });
-    GameStateMove m = getBestMove(gs, cache, 3);
+    GameStateMove m = getBestMove(gs, cache, 5);
     drawBoard(m.startX, m.startY, m.endX, m.endY);
     setEventLog();
     eventLog.push_back(m.toString(gs));
