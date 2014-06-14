@@ -15,10 +15,15 @@
 
 struct termios originalTermIOS;
 
+void handleExit()
+{
+    tcsetattr(0, TCSADRAIN, &originalTermIOS);
+}
+
 void handleSignal(int sig)
 {
     signal(sig, SIG_DFL);
-    tcsetattr(0, TCSADRAIN, &originalTermIOS);
+    handleExit();
     raise(sig);
 }
 
@@ -144,7 +149,7 @@ void drawEventLog()
         string str = "";
         if(i >= 0)
             str = eventLog[i];
-        os << "\x1B[H\x1B[" << (15 + (eventLog.size() - i - 1)) << "B" << str << "\x1b[K";
+        os << "\x1B[H\x1B[" << (3 + (eventLog.size() - i - 1)) << "B\x1b[30C" << str << "\x1b[K";
     }
     os << "\x1b[u";
     cout << os.str() << flush;
@@ -153,6 +158,13 @@ void drawEventLog()
 mutex keyPressEventMutex;
 condition_variable keyPressEventCond;
 queue<KeyPressEvent> keyPressEvents;
+atomic_bool backspacePressed(false);
+
+bool hasKeyPressEvent()
+{
+    unique_lock<mutex> lock(keyPressEventMutex);
+    return keyPressEvents.size() != 0;
+}
 
 KeyPressEvent getKeyPressEvent()
 {
@@ -166,6 +178,8 @@ KeyPressEvent getKeyPressEvent()
 
 void pushKeyPressEvent(KeyPressEvent event)
 {
+    if(event == KeyPressEvent::Backspace)
+        backspacePressed = true;
     unique_lock<mutex> lock(keyPressEventMutex);
     keyPressEvents.push(event);
     keyPressEventCond.notify_all();
@@ -425,7 +439,7 @@ void undoMove()
 
 bool anyValidMove(int startX, int startY)
 {
-    vector<GameStateMove> moves = cache.getValidMoves(gs);
+    auto moves = cache.getValidMoves(gs);
     for(auto m : moves)
     {
         if(m.startX == (size_t)startX && m.startY == (size_t)startY)
@@ -445,7 +459,7 @@ void setEventLog()
 
 vector<GameStateMove> getValidMoves(int startX, int startY, int endX, int endY)
 {
-    vector<GameStateMove> moves = cache.getValidMoves(gs);
+    auto moves = cache.getValidMoves(gs);
     vector<GameStateMove> retval;
     for(auto m : moves)
     {
@@ -458,54 +472,135 @@ vector<GameStateMove> getValidMoves(int startX, int startY, int endX, int endY)
 void runComputerMove()
 {
     drawBoard();
+    drawEventLog();
     atomic_bool done(false);
-    thread waitThread([&done]()
+    atomic<float> progress(0);
+    thread waitThread([&done, &progress]()
     {
         int i = 0;
         while(!done)
         {
-            usleep(200000);
             ostringstream os;
-            os << "\x1b[s\x1b[H\x1b[14BWorking";
+            drawBoard();
+            drawEventLog();
+            os << "\x1b[s\x1b[H\x1b[12BWorking (" << (int)(100 * progress) << "%)";
             for(int j = 0; j < i + 2; j++)
                 os << ".";
-            os << "\x1b[K\x1b[u";
+            os << "\x1b[u";
             cout << os.str() << flush;
             i++;
-            i %= 3;
+            i %= 4;
+            for(int j = 0; j < 20; j++)
+            {
+                usleep(20000);
+                if(done)
+                    break;
+            }
         }
-        cout << "\x1b[s\x1b[H\x1b[14B\x1b[K\x1b[u" << flush;
+        drawBoard();
+        drawEventLog();
     });
-    GameStateMove m = getBestMove(gs, cache, 5);
-    drawBoard(m.startX, m.startY, m.endX, m.endY);
-    setEventLog();
-    eventLog.push_back(m.toString(gs));
-    drawEventLog();
+    backspacePressed = false;
+    try
+    {
+        GameStateMove m = getBestMove(gs, cache, backspacePressed, 5, &progress);
+        done = true;
+        waitThread.join();
+        drawBoard(m.startX, m.startY, m.endX, m.endY);
+        setEventLog();
+        eventLog.push_back(m.toString(gs));
+        drawEventLog();
+        for(int i = 0; i < 10; i++)
+        {
+            usleep(100000);
+            if(backspacePressed)
+                throw CanceledMove();
+        }
+        makeMove(m);
+        drawBoard();
+        drawEventLog();
+    }
+    catch(CanceledMove &)
+    {
+        undoMove();
+        drawBoard();
+        drawEventLog();
+    }
     done = true;
-    sleep(1);
-    waitThread.join();
-    makeMove(m);
-    drawBoard();
+    if(waitThread.joinable())
+        waitThread.join();
+    while(hasKeyPressEvent())
+        getKeyPressEvent();
 }
 
-void playGame()
+vector<GameStateMove> pickMove(vector<GameStateMove> moves)
 {
+    size_t selected = 0;
+    assert(moves.size() >= 1);
+    for(;;)
+    {
+        drawBoard();
+        drawEventLog();
+        cout << "\x1b[H\x1b[m\x1b[5B";
+        for(size_t i = 0; i < moves.size(); i++)
+        {
+            string str = moves[i].toString(gs);
+            const size_t size = 18;
+            while(str.size() < size)
+            {
+                str += " ";
+            }
+            cout << "\x1b[6C  ";
+            if(i == selected)
+                cout << "\x1b[1m";
+            cout << str << "\x1b[m\r\n";
+        }
+        switch(getKeyPressEvent())
+        {
+        case KeyPressEvent::Space:
+        case KeyPressEvent::Enter:
+            return vector<GameStateMove>{moves[selected]};
+        case KeyPressEvent::Q:
+        case KeyPressEvent::Backspace:
+            return vector<GameStateMove>();
+        case KeyPressEvent::Up:
+            if(selected > 0)
+                selected--;
+            break;
+        case KeyPressEvent::Down:
+            if(selected < moves.size() - 1)
+                selected++;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void playGame(PieceColor computerColor)
+{
+    cout << "\x1b[m\x1b[H\x1b[2J";
+    drawHeader();
+    gss.clear();
+    gs = GameState::makeInitialGameState();
+    setEventLog();
+    drawEventLog();
     int startX = BoardSize / 2, startY = BoardSize / 2;
     int endX = -1, endY = -1;
     while(gs.getEndCondition(cache) == EndCondition::Nothing)
     {
-        if(gs.player == Player::Black)
+        if(getPieceColor(gs.player) == computerColor)
         {
             runComputerMove();
             continue;
         }
         drawBoard(startX, startY, endX, endY);
+        drawEventLog();
         KeyPressEvent event = getKeyPressEvent();
         switch(event)
         {
         case KeyPressEvent::Q:
-            exit(0);
-            break;
+            return;
         case KeyPressEvent::Space:
         case KeyPressEvent::Enter:
             if(endX == -1)
@@ -523,7 +618,9 @@ void playGame()
             }
             else
             {
-                auto validMoves = getValidMoves(startX, startY, endX, endY);
+                vector<GameStateMove> validMoves = getValidMoves(startX, startY, endX, endY);
+                if(validMoves.size() > 1)
+                    validMoves = pickMove(validMoves);
                 if(!validMoves.empty())
                 {
                     assert(validMoves.size() == 1);
@@ -656,10 +753,19 @@ void playGame()
                 endY = 7;
             break;
         case KeyPressEvent::Backspace:
-            undoMove();
-            undoMove();
-            setEventLog();
-            drawEventLog();
+            if(endX != -1)
+            {
+                endX = -1;
+                endY = -1;
+            }
+            else
+            {
+                if(computerColor != PieceColor::None)
+                    undoMove();
+                undoMove();
+                setEventLog();
+                drawEventLog();
+            }
             break;
         default:
             break;
@@ -687,14 +793,72 @@ void playGame()
         break;
     }
     drawEventLog();
+    for(;;)
+    {
+        KeyPressEvent event = getKeyPressEvent();
+        if(event == KeyPressEvent::Enter || event == KeyPressEvent::Space)
+            break;
+    }
 }
 
 int main()
 {
     setTerminalToRaw();
-    atexit([](){raise(SIGTERM);});
+    atexit(handleExit);
     thread(keyboardThreadFn).detach();
-    playGame();
-    raise(SIGTERM);
+    int selected = 0;
+    for(bool done = false;!done;)
+    {
+        string selectedStrings[4];
+        selectedStrings[selected] = "\x1b[;1m";
+        cout << "\x1b[m";
+        drawHeader();
+        cout << selectedStrings[0];
+        cout << "<\x1b[4mP\x1b[m" << selectedStrings[0] << "layer versus Player>\x1b[m\r\n" << selectedStrings[1];
+        cout << "<Player (\x1b[4mW\x1b[m" << selectedStrings[1] << "hite) versus Computer>\x1b[m\r\n" << selectedStrings[2];
+        cout << "<Computer versus Player (\x1b[4mB\x1b[m" << selectedStrings[2] << "lack)>\x1b[m\r\n";
+        cout << selectedStrings[3] << "<\x1b[4mQ\x1b[m" << selectedStrings[3] << "uit>\x1b[m\r\n\r\n" << flush;
+        switch(getKeyPressEvent())
+        {
+        case KeyPressEvent::P:
+            playGame(PieceColor::None);
+            break;
+        case KeyPressEvent::W:
+            playGame(PieceColor::Black);
+            break;
+        case KeyPressEvent::B:
+            playGame(PieceColor::White);
+            break;
+        case KeyPressEvent::Q:
+            done = true;
+            break;
+        case KeyPressEvent::Space:
+        case KeyPressEvent::Enter:
+            switch(selected)
+            {
+            case 0:
+                playGame(PieceColor::None);
+                break;
+            case 1:
+                playGame(PieceColor::Black);
+                break;
+            case 2:
+                playGame(PieceColor::White);
+                break;
+            default:
+                done = true;
+                break;
+            }
+            break;
+        case KeyPressEvent::Up:
+            selected = max(0, selected - 1);
+            break;
+        case KeyPressEvent::Down:
+            selected = min(3, selected + 1);
+            break;
+        default:
+            break;
+        }
+    }
     return 0;
 }

@@ -12,6 +12,8 @@
 #include <iostream>
 #include <string>
 #include <sstream>
+#include <atomic>
+#include "static_vector.h"
 
 using namespace std;
 
@@ -403,11 +405,19 @@ struct hash<GameState> final
 };
 }
 
+struct CanceledMove final : public runtime_error
+{
+    CanceledMove()
+        : runtime_error("move canceled")
+    {
+    }
+};
+
 struct GameStateMove final
 {
-    size_t startX, startY;
-    size_t endX, endY;
-    size_t captureX, captureY;
+    unsigned startX : 4, startY : 4;
+    unsigned endX : 4, endY : 4;
+    unsigned captureX : 4, captureY : 4;
     PieceType promoteToType;
     GameStateMove(size_t startX, size_t startY, size_t endX, size_t endY, size_t captureX, size_t captureY, PieceType promoteToType = PieceType::Empty)
         : startX(startX), startY(startY), endX(endX), endY(endY), captureX(captureX), captureY(captureY), promoteToType(promoteToType)
@@ -506,14 +516,14 @@ struct GameStateMove final
             }
         }
         PieceType capturedPiece = gs.board[captureX][captureY];
-        os << getPieceString(setPieceColor(movingPiece, Player::White), true);
+        os << getPieceString(setPieceColor(movingPiece, Player::Black), true);
         os << (char)('a' + startX) << (char)('1' + startY);
         if(capturedPiece != PieceType::Empty)
             os << "x";
         os << (char)('a' + endX) << (char)('1' + endY);
         if(promoteToType != PieceType::Empty)
         {
-            os << "=" << getPieceString(setPieceColor(promoteToType, Player::White), true);
+            os << "=" << getPieceString(setPieceColor(promoteToType, Player::Black), true);
         }
         if(captureX != endX || captureY != endY)
             os << "e.p.";
@@ -521,45 +531,222 @@ struct GameStateMove final
     }
 };
 
-struct GameStateCache final
+class GameStateCache final
 {
-    const vector<GameStateMove> & getValidMoves(GameState gs);
+    static constexpr size_t maxMovesPerRook = 14;
+    static constexpr size_t maxMovesPerKnight = 8;
+    static constexpr size_t maxMovesPerBishop = 15;
+    static constexpr size_t maxMovesPerQueen = maxMovesPerRook + maxMovesPerBishop;
+    static constexpr size_t maxMovesPerPawn = maxMovesPerQueen; // after they have been promoted
+    static constexpr size_t maxMovesPerKing = 8; // only 5 other moves when we can castle
+public:
+    static constexpr size_t maxMoves = maxMovesPerPawn * 8 + maxMovesPerRook * 2 + maxMovesPerKnight * 2 + maxMovesPerBishop * 2 + maxMovesPerQueen + maxMovesPerKing;
+    typedef vector<GameStateMove> MovesList;
+    const MovesList & getValidMoves(GameState gs);
 private:
+    struct EvaluationEntry final
+    {
+        float minValue;
+        float maxValue;
+        bool haveMin = false;
+        bool haveMax = false;
+        EvaluationEntry()
+        {
+        }
+        EvaluationEntry(float v)
+            : minValue(v), maxValue(v), haveMin(true), haveMax(true)
+        {
+        }
+        inline float getAverage() const
+        {
+            assert(haveMin || haveMax);
+            if(haveMin && haveMax)
+                return 0.5f * (minValue + maxValue);
+            if(haveMin)
+                return minValue;
+            return maxValue;
+        }
+        inline bool hasAnyData() const
+        {
+            return haveMin || haveMax;
+        }
+    };
     struct Data final
     {
-        vector<GameStateMove> validMoves;
-        uint64_t lastAccessTimeStamp = 0;
+        GameState gs;
+        Data * hashNext = nullptr;
+        MovesList validMoves;
+        bool used = true;
         bool calculated = false;
-    };
-    unordered_map<GameState, Data> validMovesMap;
-    static constexpr size_t maxEntryCount = 200000;
-    static constexpr size_t entryCountSlop = 20000;
-    uint64_t currentTimeStamp = 0;
-    inline Data & getGameStateEntry(GameState gs)
-    {
-        if(validMovesMap.size() > maxEntryCount + entryCountSlop)
+        vector<EvaluationEntry> evaluationValue;
+        Data(GameState gs)
+            : gs(gs)
         {
-            const uint64_t minTimeStampToKeep = currentTimeStamp - maxEntryCount;
-            for(auto i = validMovesMap.begin(); i != validMovesMap.end();)
+        }
+    };
+    inline float getSortingEvaluation(Data & data)
+    {
+        while(!data.evaluationValue.empty() && !data.evaluationValue.back().hasAnyData())
+            data.evaluationValue.pop_back();
+        if(data.evaluationValue.empty())
+            data.evaluationValue.push_back(data.gs.getStaticEvaluation(*this));
+        return data.evaluationValue.back().getAverage();
+    }
+    void sortValidMoves(Data & data);
+    void sortValidMoves(GameState gs)
+    {
+        sortValidMoves(getGameStateEntry(gs));
+    }
+    static constexpr size_t hashPrime = 100003;
+    array<Data *, hashPrime> hashTable;
+    union FreeListElement
+    {
+        char data[sizeof(Data)];
+        FreeListElement * next;
+    };
+    static_assert(sizeof(FreeListElement) == sizeof(Data), "FreeListElement is not the right size");
+    struct DataArena final
+    {
+        static const size_t BlockSize = 1024;
+        typedef FreeListElement MemoryBlock;
+        array<MemoryBlock, BlockSize> blocks;
+        size_t allocated = 0;
+    };
+    vector<DataArena *> arenas;
+    FreeListElement * freeListHead = nullptr;
+    size_t hashTableSize = 0;
+    inline Data * allocateData(GameState gs)
+    {
+        FreeListElement * mem = freeListHead;
+        if(freeListHead != nullptr)
+            freeListHead = freeListHead->next;
+        else
+        {
+            if(arenas.empty() || arenas.back()->allocated >= DataArena::BlockSize)
             {
-                Data & data = get<1>(*i);
-                if(data.lastAccessTimeStamp < minTimeStampToKeep)
-                    i = validMovesMap.erase(i);
-                else
-                    i++;
+                arenas.push_back(new DataArena);
+            }
+            mem = &arenas.back()->blocks[arenas.back()->allocated++];
+        }
+        return new((void *)mem) Data(gs);
+    }
+    inline void freeData(Data * data)
+    {
+        data->~Data();
+        FreeListElement * fle = (FreeListElement *)data;
+        fle->next = freeListHead;
+        freeListHead = fle;
+    }
+    std::hash<GameState> hasher;
+    inline Data & find(GameState gs)
+    {
+        size_t hash = hasher(gs) % hashPrime;
+        Data ** ppnode = &hashTable[hash];
+        Data * pnode = *ppnode;
+        while(pnode != nullptr)
+        {
+            if(pnode->gs == gs)
+            {
+                *ppnode = pnode->hashNext;
+                pnode->hashNext = hashTable[hash];
+                hashTable[hash] = pnode;
+                return *pnode;
+            }
+            ppnode = &pnode->hashNext;
+            pnode = *ppnode;
+        }
+        pnode = allocateData(gs);
+        hashTableSize++;
+        pnode->hashNext = hashTable[hash];
+        hashTable[hash] = pnode;
+        return *pnode;
+    }
+    static constexpr size_t maxEntryCount = 1000000;
+    static constexpr size_t entryCountSlop = 100000;
+public:
+    GameStateCache()
+    {
+        for(Data *& v : hashTable)
+        {
+            v = nullptr;
+        }
+    }
+    ~GameStateCache()
+    {
+        for(Data * node : hashTable)
+        {
+            while(node != nullptr)
+            {
+                Data * deleteMe = node;
+                node = node->hashNext;
+                freeData(deleteMe);
             }
         }
-        Data & retval = validMovesMap[gs];
-        retval.lastAccessTimeStamp = ++currentTimeStamp;
+        for(DataArena * arena : arenas)
+            delete arena;
+    }
+private:
+    GameStateCache(const GameStateCache &) = delete;
+    const GameStateCache & operator =(const GameStateCache &) = delete;
+    static constexpr size_t maxCollectTime = maxEntryCount * 20;
+    size_t collectTimeLeft = maxCollectTime;
+    static constexpr size_t collectTimeSlop = maxCollectTime / 10;
+    inline Data & getGameStateEntry(GameState gs)
+    {
+        if((hashTableSize > maxEntryCount + entryCountSlop && collectTimeLeft < maxCollectTime - collectTimeSlop) || (hashTableSize > maxEntryCount && --collectTimeLeft == 0) || hashTableSize > maxEntryCount + entryCountSlop * 2)
+        {
+            collectTimeLeft = maxCollectTime;
+            for(Data *& tableEntry : hashTable)
+            {
+                Data ** ppnode = &tableEntry;
+                Data * pnode = *ppnode;
+                for(;pnode != nullptr;)
+                {
+                    Data & data = *pnode;
+                    if(!data.used)
+                    {
+                        *ppnode = pnode->hashNext;
+                        freeData(pnode);
+                        pnode = *ppnode;
+                        hashTableSize--;
+                    }
+                    else
+                    {
+                        data.used = false;
+                        ppnode = &pnode->hashNext;
+                        pnode = *ppnode;
+                    }
+                }
+            }
+        }
+        Data & retval = find(gs);
+        retval.used = true;
         return retval;
     }
+    float evaluateMoveHelper(GameState gs, atomic_bool &canceled, int depth, float bestValue, float worstValue);
+    float evaluateMove(GameState gs, atomic_bool &canceled, int depth);
 public:
     void dumpStats()
     {
-        cout << "Game State Count : " << validMovesMap.size() << "\x1b[K\r\n" << flush;
+        cout << "Game State Count : " << hashTableSize;
     }
+    GameStateMove getBestMove(GameState gs, atomic_bool &canceled, int depth = 3, atomic<float> *progress = nullptr);
 };
 
-GameStateMove getBestMove(GameState gs, GameStateCache &cache, int depth = 3);
+inline GameStateMove getBestMove(GameState gs, GameStateCache &cache, atomic_bool &canceled, int depth = 3, atomic<float> *progress = nullptr)
+{
+    return cache.getBestMove(gs, canceled, depth, progress);
+}
+
+inline GameStateMove getBestMove(GameState gs, GameStateCache &cache, int depth = 3, atomic<float> *progress = nullptr)
+{
+    atomic_bool canceled(false);
+    return cache.getBestMove(gs, canceled, depth, progress);
+}
+
+inline void drawHeader()
+{
+    cout << "\x1b[H\x1b[m\x1b[2J    Chess 1.0   By Jacob Lifshay (c) 2014\r\n\r\n" << flush;
+}
 
 #endif // GAME_STATE_H_INCLUDED

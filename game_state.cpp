@@ -1,5 +1,6 @@
 #include "game_state.h"
 #include <cmath> // for abs
+#include <algorithm>
 
 using namespace std;
 
@@ -328,7 +329,7 @@ bool GameState::isPositionAttacked(size_t x, size_t y, Player side) const
 
 namespace
 {
-void addPawnMove(vector<GameStateMove> & moves, GameStateMove m, Player player)
+void addPawnMove(GameStateCache::MovesList & moves, GameStateMove m, Player player)
 {
     const size_t queeningRow = (player == Player::White ? BoardSize - 1 : 0);
     if(m.endY == queeningRow)
@@ -344,7 +345,7 @@ void addPawnMove(vector<GameStateMove> & moves, GameStateMove m, Player player)
         moves.push_back(m);
 }
 
-void addPawnMoves(vector<GameStateMove> & moves, GameState gs)
+void addPawnMoves(GameStateCache::MovesList & moves, GameState gs)
 {
     const PieceType pawn = (gs.player == Player::White ? PieceType::WhitePawn : PieceType::BlackPawn);
     const int yMoveDir = (gs.player == Player::White ? 1 : -1);
@@ -399,7 +400,7 @@ void addPawnMoves(vector<GameStateMove> & moves, GameState gs)
     }
 }
 
-void addRookBishopQueenAndKingMoves(vector<GameStateMove> & moves, GameState gs)
+void addRookBishopQueenAndKingMoves(GameStateCache::MovesList & moves, GameState gs)
 {
     const PieceType rook = setPieceColor(PieceType::WhiteRook, gs.player);
     const PieceType bishop = setPieceColor(PieceType::WhiteBishop, gs.player);
@@ -439,7 +440,7 @@ void addRookBishopQueenAndKingMoves(vector<GameStateMove> & moves, GameState gs)
     }
 }
 
-void addKnightMoves(vector<GameStateMove> & moves, GameState gs)
+void addKnightMoves(GameStateCache::MovesList & moves, GameState gs)
 {
     const PieceType knight = setPieceColor(PieceType::WhiteKnight, gs.player);
     for(size_t pieceX = 0; pieceX < BoardSize; pieceX++)
@@ -486,7 +487,7 @@ bool isRangeEmpty(GameState gs, size_t minX, size_t maxX, size_t y)
     return true;
 }
 
-void addCastlingMoves(vector<GameStateMove> & moves, GameState gs)
+void addCastlingMoves(GameStateCache::MovesList & moves, GameState gs)
 {
     if(gs.player == Player::White)
     {
@@ -511,9 +512,38 @@ void addCastlingMoves(vector<GameStateMove> & moves, GameState gs)
         }
     }
 }
+
+template <typename T>
+struct shrinkToFit_t final
+{
+    shrinkToFit_t(T & v);
+};
+
+template <typename T>
+struct shrinkToFit_t<vector<T>> final
+{
+    shrinkToFit_t(vector<T> & v)
+    {
+        v.shrink_to_fit();
+    }
+};
+
+template <typename T, size_t n>
+struct shrinkToFit_t<static_vector<T, n>> final
+{
+    shrinkToFit_t(static_vector<T, n> &)
+    {
+    }
+};
+
+template <typename T>
+void shrinkToFit(T & v)
+{
+    shrinkToFit_t<T> obj(v);
+}
 }
 
-const vector<GameStateMove> & GameStateCache::getValidMoves(GameState gs)
+const GameStateCache::MovesList & GameStateCache::getValidMoves(GameState gs)
 {
     Data & data = getGameStateEntry(gs);
     if(data.calculated)
@@ -536,18 +566,21 @@ const vector<GameStateMove> & GameStateCache::getValidMoves(GameState gs)
         else
             i++;
     }
+    shrinkToFit(data.validMoves);
     data.calculated = true;
     return data.validMoves;
 }
 
+constexpr float eps = 1e-4;
+
 void GameState::drawChessBoard(GameStateCache &cache, bool useUnicode, bool moveToHome, int startX, int startY, int endX, int endY) const
 {
     if(moveToHome)
-        cout << "\x1b[H";
+        drawHeader();
     else
         cout << "\r\n";
-    cout << (player == Player::White ? "White" : "Black") << "'s Turn.\x1b[K\r\n";
-    const vector<GameStateMove> &moves = cache.getValidMoves(*this);
+    cout << (player == Player::White ? "White" : "Black") << "'s Turn.                 \r\n";
+    const GameStateCache::MovesList &moves = cache.getValidMoves(*this);
     vector<GameStateMove> filteredMoves;
     for(GameStateMove m : moves)
     {
@@ -556,11 +589,12 @@ void GameState::drawChessBoard(GameStateCache &cache, bool useUnicode, bool move
     }
     for(size_t y = BoardSize - 1, i = 0; i < BoardSize; i++, y--)
     {
+        cout << "\x1b[;1m" << (char)(y + '1') << " ";
         for(size_t x = 0; x < BoardSize; x++)
         {
             int selectedColor = -1;
-            if(getPieceColor(board[x][y]) != getPieceColor(player) && isPositionAttacked(x, y, getOpponent(player)))
-                selectedColor = 0;
+            //if(getPieceColor(board[x][y]) != getPieceColor(player) && isPositionAttacked(x, y, getOpponent(player)))
+            //    selectedColor = 0;
             if((int)x == startX && (int)y == startY && (int)x == endX && (int)y == endY)
             {
                 selectedColor = 1;
@@ -617,18 +651,26 @@ void GameState::drawChessBoard(GameStateCache &cache, bool useUnicode, bool move
                 cout << "\x1b[;47;1;3" << max(0, selectedColor) << "m" << closingChar;
             }
         }
-        cout << "\x1b[m\x1b[K\r\n";
+        cout << "\x1b[m    \r\n";
     }
-    cout << "\x1b[K\r\n" << flush;
+#if 1
+    cout << "\x1b[m";
+    cache.dumpStats();
+    cout << "\r\n";
+#else
+    cout << "\x1b[;1m   A  B  C  D  E  F  G  H     \x1b[m\r\n";
+#endif
+    if(!moveToHome)
+        cout << "\x1b[K\r\n" << flush;
+    else
+        cout << flush;
 }
 
-namespace
-{
-float getBestMoveHelper(GameState gs, GameStateCache &cache, int depth, float bestValue = 1000, float worstValue = -1000)
+float GameStateCache::evaluateMoveHelper(GameState gs, atomic_bool &canceled, int depth, float bestValue, float worstValue)
 {
     if(depth <= 0)
-        return gs.getStaticEvaluation(cache);
-    EndCondition endCondition = gs.getEndCondition(cache);
+        return gs.getStaticEvaluation(*this);
+    EndCondition endCondition = gs.getEndCondition(*this);
     if(endCondition != EndCondition::Nothing)
     {
         if(endCondition == EndCondition::Win)
@@ -637,36 +679,121 @@ float getBestMoveHelper(GameState gs, GameStateCache &cache, int depth, float be
             return -1000;
         return 0;
     }
-    const vector<GameStateMove> moves = cache.getValidMoves(gs);
+    if(canceled)
+        throw CanceledMove();
+    Data & data = getGameStateEntry(gs);
+    sortValidMoves(data);
+    const MovesList moves = getValidMoves(gs);
     assert(moves.size() != 0);
+    if(data.evaluationValue.size() < (size_t)depth + 1)
+        data.evaluationValue.resize((size_t)depth + 1);
+    EvaluationEntry &evaluationEntry = data.evaluationValue[depth];
+    if(evaluationEntry.haveMin)
+    {
+        if(evaluationEntry.minValue >= bestValue)
+            return evaluationEntry.minValue;
+        if(evaluationEntry.minValue > worstValue)
+            worstValue = evaluationEntry.minValue;
+    }
+    if(evaluationEntry.haveMax)
+    {
+        if(evaluationEntry.maxValue <= worstValue)
+            return evaluationEntry.maxValue;
+        if(evaluationEntry.maxValue < bestValue)
+            bestValue = evaluationEntry.maxValue;
+    }
     float retval = worstValue;
     for(auto m : moves)
     {
-        float v = -getBestMoveHelper(m.apply(gs), cache, depth - 1, -retval, -bestValue);
-        retval = max(retval, v);
+        try
+        {
+            float v = -evaluateMoveHelper(m.apply(gs), canceled, depth - 1, -retval, -bestValue);
+            retval = max(retval, v);
+        }
+        catch(CanceledMove &e)
+        {
+            if(retval != worstValue)
+            {
+                if(!evaluationEntry.haveMin || evaluationEntry.minValue < retval)
+                {
+                    evaluationEntry.haveMin = true;
+                    evaluationEntry.minValue = retval;
+                }
+            }
+            throw e;
+        }
         if(retval >= bestValue)
+        {
+            if(!evaluationEntry.haveMin || evaluationEntry.minValue < retval)
+            {
+                evaluationEntry.haveMin = true;
+                evaluationEntry.minValue = retval;
+            }
             return retval;
+        }
+    }
+    if(!evaluationEntry.haveMax || evaluationEntry.maxValue > retval)
+    {
+        evaluationEntry.haveMax = true;
+        evaluationEntry.maxValue = retval;
+    }
+    if(retval != worstValue)
+    {
+        if(!evaluationEntry.haveMin || evaluationEntry.minValue < retval)
+        {
+            evaluationEntry.haveMin = true;
+            evaluationEntry.minValue = retval;
+        }
     }
     return retval;
 }
+
+float GameStateCache::evaluateMove(GameState gs, atomic_bool &canceled, int depth)
+{
+#if 1
+    float minV = -1000;
+    float maxV = 1000;
+    float evalValue = minV;
+    while(maxV - minV > eps)
+    {
+        float midPoint = (minV + maxV) * 0.5f;
+        float nextValue = midPoint + eps;
+        assert(nextValue > midPoint);
+        evalValue = evaluateMoveHelper(gs, canceled, depth, nextValue, midPoint);
+        if(evalValue > midPoint)
+        {
+            minV = evalValue;
+        }
+        else
+        {
+            maxV = evalValue;
+        }
+    }
+    return evalValue;
+#else
+    return evaluateMoveHelper(gs, depth, 1000, -1000);
+#endif
 }
 
-GameStateMove getBestMove(GameState gs, GameStateCache &cache, int depth)
+GameStateMove GameStateCache::getBestMove(GameState gs, atomic_bool &canceled, int depth, atomic<float> *progress)
 {
-    EndCondition endCondition = gs.getEndCondition(cache);
+    EndCondition endCondition = gs.getEndCondition(*this);
     if(endCondition != EndCondition::Nothing)
     {
         throw InvalidMove();
     }
-    const vector<GameStateMove> moves = cache.getValidMoves(gs);
+    sortValidMoves(gs);
+    const MovesList moves = getValidMoves(gs);
     assert(moves.size() != 0);
     float score;
     size_t bestMoveIndex;
     bool anyScore = false;
     for(size_t i = 0; i < moves.size(); i++)
     {
+        if(progress)
+            *progress = (float)i / moves.size();
         auto m = moves[i];
-        float v = -getBestMoveHelper(m.apply(gs), cache, depth - 1);
+        float v = -evaluateMove(m.apply(gs), canceled, depth - 1);
         if(!anyScore || v > score || (v == score && rand() % 3 == 0))
         {
             anyScore = true;
@@ -675,5 +802,28 @@ GameStateMove getBestMove(GameState gs, GameStateCache &cache, int depth)
         }
     }
     assert(anyScore);
+    if(progress)
+        *progress = 1;
     return moves[bestMoveIndex];
+}
+
+void GameStateCache::sortValidMoves(Data & data)
+{
+    if(!data.calculated)
+        getValidMoves(data.gs);
+    data.used = true;
+    assert(data.calculated);
+    const GameState & gs = data.gs;
+    sort(data.validMoves.begin(), data.validMoves.end(), [this, &gs, &data](GameStateMove l, GameStateMove r)
+    {
+        GameState lgs = l.apply(gs);
+        Data & ldata = getGameStateEntry(lgs);
+        data.used = true;
+        float lEval = getSortingEvaluation(ldata);
+        GameState rgs = r.apply(gs);
+        Data & rdata = getGameStateEntry(rgs);
+        data.used = true;
+        float rEval = getSortingEvaluation(rdata);
+        return lEval > rEval;
+    });
 }
